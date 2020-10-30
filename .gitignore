@@ -139,3 +139,6 @@ book/_build
 
 # dask
 dask-worker-space
+
+building_heights/dsm
+building_heights/dtm

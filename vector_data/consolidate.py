@@ -136,7 +136,7 @@ def consolidate(network, distance=2, epsilon=2, filter_func=None, **kwargs):
     """
 
     # polygonize network
-    polygonized = polygonize(network.geometry)
+    polygonized = polygonize(network.geometry.unary_union)
     geoms = [g for g in polygonized]
     gdf = gpd.GeoDataFrame(geometry=geoms, crs=network.crs)
 
@@ -167,8 +167,8 @@ def consolidate(network, distance=2, epsilon=2, filter_func=None, **kwargs):
     clean = network.drop(set(to_remove))
 
     # merge new geometries with the existing network
-    averaged = gpd.array.from_shapely(averaged, crs=network.crs).simplify(epsilon)
-    result = pd.concat([clean, gpd.GeoDataFrame(geometry=averaged[~averaged.is_empty])])
+    averaged = gpd.GeoSeries(averaged, crs=network.crs).simplify(epsilon).explode()   
+    result = pd.concat([clean, averaged])
     merge = topology(result)
 
     return merge
@@ -253,7 +253,8 @@ def topology(gdf):
     merge = res[np.isin(inp, unique[counts == 2])]
 
     if len(merge) > 0:
-        # filter duplications and create a dictionary with indication of components to be merged together
+        # filter duplications and create a dictionary with indication of components to
+        # be merged together
         dups = [item for item, count in collections.Counter(merge).items() if count > 1]
         split = np.split(merge, len(merge) / 2)
         components = {}
@@ -278,11 +279,12 @@ def topology(gdf):
         # remove incorrect geometries and append fixed versions
         df = df.drop(merge)
         final = gpd.GeoSeries(new).explode().reset_index(drop=True)
-        return df.append(
-            gpd.GeoDataFrame({df.geometry.name: final}, geometry=df.geometry.name),
-            ignore_index=True,
-        )
-    return gdf
+        if isinstance(gdf, gpd.GeoDataFrame):
+            return df.append(
+                gpd.GeoDataFrame({df.geometry.name: final}, geometry=df.geometry.name),
+                ignore_index=True,
+            )
+        return df.append(final, ignore_index=True)
 
 
 def measure_network(xy, user, pwd, host, port, buffer, area, circom, cons=True):

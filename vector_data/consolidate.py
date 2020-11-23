@@ -285,6 +285,68 @@ def topology(gdf):
                 ignore_index=True,
             )
         return df.append(final, ignore_index=True)
+    
+    
+def consolidate_nodes(gdf, tolerance):
+    """ Return geoemtry with consolidated nodes.
+    
+    Replace clusters of nodes with a single node (weighted centroid
+    of a cluster) and snap linestring geometry to it. Cluster is 
+    defined using DBSCAN on coordinates with ``tolerance``==``eps`.
+    
+    Does not preserve any attributes, function is purely geometric.
+    
+    Parameters
+    ----------
+    gdf : GeoDataFrame
+        GeoDataFrame with LineStrings (usually representing street network)
+    tolerance : float
+        The maximum distance between two nodes for one to be considered 
+        as in the neighborhood of the other. Nodes within tolerance are
+        considered a part of a single cluster and will be consolidated.
+        
+    Returns
+    -------
+    GeoSeries
+    """
+    from sklearn.cluster import DBSCAN
+
+    # get nodes and edges
+    G = mm.gdf_to_nx(gdf)
+    nodes, edges = mm.nx_to_gdf(G)
+    
+    # get clusters of nodes which should be consolidated
+    db = DBSCAN(eps=tolerance, min_samples=2).fit(pygeos.get_coordinates(nodes.geometry.values.data))
+    nodes['lab'] = db.labels_
+    nodes['lab'] = nodes['lab'].replace({-1: np.nan})  # remove unassigned nodes
+    change = nodes.dropna().set_index('lab').geometry
+
+    # get pygeos geometry
+    geom = edges.geometry.values.data
+    
+    # loop over clusters, cut out geometry within tolerance / 2 and replace it
+    # with spider-like geometry to the weighted centroid of a cluster
+    spiders = []
+    midpoints = []
+    for cl in change.index.unique():
+        cluster = change.loc[cl] 
+        cookie = pygeos.from_shapely(cluster.buffer(tolerance / 2).unary_union)
+        inds = pygeos.STRtree(geom).query(cookie, predicate='intersects')
+        pts = pygeos.get_coordinates(pygeos.intersection(geom[inds], pygeos.boundary(cookie)))
+        geom[inds] = pygeos.difference(geom[inds], cookie)
+        if pts.shape[0] > 0:
+            midpoint = np.mean(pygeos.get_coordinates(cluster.values.data), axis=0)
+            midpoints.append(midpoint)
+            mids = np.array([midpoint,] * len(pts))
+            spider = pygeos.linestrings(np.array([pts[:, 0], mids[:, 0]]).T, y=np.array([pts[:, 1], mids[:, 1]]).T)
+            spiders.append(spider)
+    
+    # combine geometries
+    geometry = np.append(geom, np.hstack(spiders))
+    geometry = geometry[~pygeos.is_empty(geometry)]
+    
+    midpoints = gpd.GeoSeries(pygeos.points(midpoints), crs=gdf.crs)
+    return gpd.GeoSeries(geometry, crs=gdf.crs), midpoints
 
 
 def measure_network(xy, user, pwd, host, port, buffer, area, circom, cons=True):

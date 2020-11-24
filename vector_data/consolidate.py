@@ -344,9 +344,10 @@ def consolidate_nodes(gdf, tolerance):
     # combine geometries
     geometry = np.append(geom, np.hstack(spiders))
     geometry = geometry[~pygeos.is_empty(geometry)]
+    topological = topology(gpd.GeoSeries(geometry, crs=gdf.crs))
     
     midpoints = gpd.GeoSeries(pygeos.points(midpoints), crs=gdf.crs)
-    return gpd.GeoSeries(geometry, crs=gdf.crs), midpoints
+    return topological, midpoints
 
 
 def measure_network(xy, user, pwd, host, port, buffer, area, circom, cons=True):

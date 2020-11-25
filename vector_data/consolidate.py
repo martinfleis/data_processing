@@ -1,5 +1,7 @@
 from itertools import combinations
 import collections
+import math
+
 
 import pygeos
 import numpy as np
@@ -8,7 +10,10 @@ import geopandas as gpd
 import momepy as mm
 
 from shapely.ops import polygonize
+from shapely.geometry import box
 from scipy.spatial import Voronoi
+
+from libpysal.weights import Queen, W, w_union
 
 
 # helper functions
@@ -44,13 +49,9 @@ def _average_geometry(lines, poly=None, distance=2):
     Returns list of averaged geometries
     """
     if not poly:
-        polygons = list(polygonize(lines))
-        if len(polygons) == 1:
-            poly = polygons[0]
-        else:
-            raise ValueError("given lines do not form a single polygon")
+        poly = box(*lines.total_bounds)
     # get an additional line around the lines to avoid infinity issues with Voronoi
-    extended_lines = [poly.buffer(distance).exterior] + lines
+    extended_lines = [poly.buffer(distance).exterior] + list(lines)
 
     # interpolate lines to represent them as points for Voronoi
     points = np.empty((0, 2))
@@ -156,7 +157,7 @@ def consolidate(network, distance=2, epsilon=2, filter_func=None, **kwargs):
             ["LineString", "MultiLineString"]
         )
         real = real[mask]
-        lines = list(real.geometry)
+        lines = real.geometry
         to_remove += list(real.index)
 
         if lines:
@@ -401,3 +402,113 @@ def measure_network(xy, user, pwd, host, port, buffer, area, circom, cons=True):
         ]
     except ValueError:
         return None
+
+    
+
+
+
+def _getAngle(pt1, pt2):
+    """
+    pt1, pt2 : tuple
+    """
+    x_diff = pt2[0] - pt1[0]
+    y_diff = pt2[1] - pt1[1]
+    return math.degrees(math.atan2(y_diff, x_diff))
+
+
+def _getPoint1(pt, bearing, dist):
+    """
+    pt : tuple
+    """
+    angle = bearing + 90
+    bearing = math.radians(angle)
+    x = pt[0] + dist * math.cos(bearing)
+    y = pt[1] + dist * math.sin(bearing)
+    return (x, y)
+
+
+def _getPoint2(pt, bearing, dist):
+    """
+    pt : tuple
+    """
+    bearing = math.radians(bearing)
+    x = pt[0] + dist * math.cos(bearing)
+    y = pt[1] + dist * math.sin(bearing)
+    return (x, y)
+
+def _get_line(pt1, pt2, tick_length):
+    angle = _getAngle(pt1, pt2)
+    line_end_1 = _getPoint1(pt1, angle, tick_length / 2)
+    angle = _getAngle(line_end_1, pt1)
+    line_end_2 = _getPoint2(line_end_1, angle, tick_length)
+    return [line_end_1, line_end_2]
+
+
+
+def highway_fix(gdf, tick_length, allowed_error, tolerance):
+    
+    high = gdf[gdf.highway.astype(str) == 'motorway']
+    
+    Q = Queen.from_dataframe(high, silence_warnings=True)
+    
+    neighbors = {}
+
+    pygeos_lines = high.geometry.values.data
+    for i, line in enumerate(pygeos_lines):
+        pts = pygeos.line_interpolate_point(line, [1, 10])
+        coo = pygeos.get_coordinates(pts)
+
+        l1 = _get_line(coo[0], coo[1], tick_length)
+        l2 = _get_line(coo[1], coo[0], tick_length)
+
+        query = high.sindex.query_bulk(pygeos.linestrings([l1, l2]), predicate='intersects')
+        un, ct = np.unique(query[1], return_counts=True)
+        double = un[(un!=i) & (ct==2)]
+        if len(double) > 0:
+            distances = pygeos.distance(pts, pygeos_lines[double])
+            if abs(distances[0] - distances[1]) <= allowed_error:
+                neighbors[i] = double
+        else:
+            neighbors[i] = []
+    
+    w = W(neighbors, silence_warnings=True)
+    union = w_union(Q, w, silence_warnings=True)
+    
+    non_high = gdf[gdf.highway.astype(str) != 'motorway']
+
+    replacements = []
+    removal_non = []
+    snapped = []
+    for c in range(union.n_components):
+        lines = high.geometry[union.component_labels == c]
+        av = _average_geometry(lines)
+        qbulk = lines.sindex.query_bulk(av, predicate='intersects')
+        comp = np.delete(av, qbulk[0])
+        comp = comp[~pygeos.is_empty(comp)]
+        replacements.append(comp)
+
+        # snap
+        coords = pygeos.get_coordinates(comp)
+        indices = pygeos.get_num_coordinates(comp)
+
+        # generate a list of start and end coordinates and create point geometries
+        edges = [0]
+        i = 0
+        for ind in indices:
+            ix = i + ind
+            edges.append(ix - 1)
+            edges.append(ix)
+            i = ix
+        edges = edges[:-1]
+        component_nodes = pygeos.points(np.unique(coords[edges], axis=0))
+
+        _, to_snap = non_high.sindex.query_bulk(high.geometry[union.component_labels == c], predicate='touches')
+        snap = pygeos.snap(non_high.iloc[np.unique(to_snap)].geometry.values.data, pygeos.union_all(component_nodes), tolerance)
+
+        removal_non.append(to_snap)
+        snapped.append(snap)
+    
+    clean = non_high.drop(non_high.iloc[np.concatenate([a.flatten() for a in removal_non])].index)
+    final = np.concatenate([clean.geometry.values.data, np.concatenate([a.flatten() for a in replacements]), np.concatenate([a.flatten() for a in snapped])])
+    return gpd.GeoSeries(final, crs=gdf.crs)
+

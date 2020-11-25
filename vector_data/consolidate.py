@@ -465,9 +465,12 @@ def highway_fix(gdf, tick_length, allowed_error, tolerance):
         un, ct = np.unique(query[1], return_counts=True)
         double = un[(un!=i) & (ct==2)]
         if len(double) > 0:
-            distances = pygeos.distance(pts, pygeos_lines[double])
-            if abs(distances[0] - distances[1]) <= allowed_error:
-                neighbors[i] = double
+            for d in range(len(double)):
+                distances = pygeos.distance(pts, pygeos_lines[d])
+                if abs(distances[0] - distances[1]) <= allowed_error:
+                    neighbors[i] = [d]
+                else:
+                    neighbors[i] = []
         else:
             neighbors[i] = []
     
